@@ -126,7 +126,6 @@ func closeAll(conn *websocket.Conn) {
 	}
 	allClosed = true
 	c.Close()
-	_ = dev.Close()
 	_ = conn.Close()
 	close(wsWriteQueue)
 	for _, id := range cmClient.Keys() {
@@ -155,14 +154,9 @@ func closeAll(conn *websocket.Conn) {
 	}
 }
 
-func run(wsConn *websocket.Conn, fd int, localIp string) {
+func run(wsConn *websocket.Conn, localIp string) {
 	ip = localIp
 	allClosed = false
-	device, _, err := tun.CreateUnmonitoredTUNFromFD(fd)
-	dev = device
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	devName, _ = dev.Name()
 	mtu, _ := dev.MTU()
@@ -183,6 +177,7 @@ func run(wsConn *websocket.Conn, fd int, localIp string) {
 	stop = make(chan struct{})
 	stopOnce = sync.Once{}
 	wsOnce = sync.Once{}
+	wsWriteQueue = make(chan msg, 1024)
 
 	type packet struct {
 		dstIP string
@@ -722,8 +717,6 @@ var (
 )
 
 func initWsWriter(wsConn *websocket.Conn) {
-	wsWriteQueue = make(chan msg, 1024)
-
 	wg.Add(1)
 	go func() {
 		defer wg.Done()

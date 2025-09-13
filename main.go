@@ -1,10 +1,13 @@
 package LeapTun_lib
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"golang.zx2c4.com/wireguard/tun"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -48,6 +51,7 @@ func start(args []string) {
 		log.Println("fd错误:", err)
 		return
 	}
+	dev, _, err = tun.CreateUnmonitoredTUNFromFD(fd)
 	localIp := args[3]
 
 	sig := make(chan os.Signal, 1)
@@ -79,8 +83,32 @@ func start(args []string) {
 				time.Sleep(5 * time.Second)
 				continue
 			}
-			// 创建 HTTP 客户端（支持重定向）
+
+			// 自定义 DNS 服务器，比如 1.1.1.1
+			customResolver := &net.Resolver{
+				PreferGo: true,
+				Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+					d := net.Dialer{
+						Timeout: time.Second * 3,
+					}
+					return d.DialContext(ctx, "udp", "1.1.1.1:53")
+				},
+			}
+
+			// 自定义 Transport
+			dialer := &net.Dialer{
+				Timeout:   10 * time.Second,
+				Resolver:  customResolver, // 用上面的自定义解析器
+				KeepAlive: 10 * time.Second,
+			}
+
+			transport := &http.Transport{
+				DialContext: dialer.DialContext,
+			}
+
 			client := &http.Client{
+				Transport: transport,
+				Timeout:   15 * time.Second,
 				CheckRedirect: func(req *http.Request, via []*http.Request) error {
 					return http.ErrUseLastResponse
 				},
@@ -155,7 +183,7 @@ func start(args []string) {
 			}
 
 			// 调用核心逻辑 run(conn)，断开后自动重连
-			run(conn, fd, localIp)
+			run(conn, localIp)
 
 			// run 返回说明 WebSocket 已断开
 			log.Println("[WARN] WebSocket 断开，5秒后重连...")
