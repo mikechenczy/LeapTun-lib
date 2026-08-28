@@ -5,7 +5,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"golang.zx2c4.com/wireguard/tun"
 	"log"
 	"net"
 	"net/http"
@@ -17,12 +16,14 @@ import (
 	"syscall"
 	"time"
 
+	"golang.zx2c4.com/wireguard/tun"
+
 	"github.com/gorilla/websocket"
 )
 
 const (
 	server  = ""
-	version = "v1.3"
+	version = "v1.4"
 	website = "https://tun.mjczy.top/"
 	source  = "https://github.com/mikechenczy/LeapTun-lib"
 	debug   = false

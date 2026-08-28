@@ -4,14 +4,15 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"github.com/gorilla/websocket"
-	"github.com/inancgumus/screen"
-	"gvisor.dev/gvisor/pkg/tcpip"
-	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"log"
 	"net"
 	"sync"
 	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/inancgumus/screen"
+	"gvisor.dev/gvisor/pkg/tcpip"
+	"gvisor.dev/gvisor/pkg/tcpip/stack"
 
 	"golang.zx2c4.com/wireguard/tun"
 )
@@ -20,13 +21,17 @@ const tunPacketOffset = 14
 const maxLimit = 1 << 23
 
 var (
-	ip       = "10.0.0.0"
-	stop     = make(chan struct{})
-	wg       sync.WaitGroup
-	stopOnce sync.Once
-	devName  string
-	dev      tun.Device
-	c        *Convertor
+	tunStarted = false
+	ip         = "10.0.0.0"
+	stop       = make(chan struct{})
+	wg         sync.WaitGroup
+	stopOnce   sync.Once
+	devName    string
+	dev        tun.Device
+	c          *Convertor
+	firewall   = FirewallConfig{
+		Default: true,
+	}
 )
 
 func getDstIP(pkt []byte) (dstIP string) {
@@ -126,6 +131,7 @@ func closeAll(conn *websocket.Conn) {
 	}
 	allClosed = true
 	c.Close()
+	_ = dev.Close()
 	_ = conn.Close()
 	close(wsWriteQueue)
 	for _, id := range cmClient.Keys() {
@@ -152,6 +158,60 @@ func closeAll(conn *websocket.Conn) {
 			_ = conn.Close()
 		}()
 	}
+}
+
+type FirewallConfig struct {
+	Local   bool   `json:"local"`
+	Default bool   `json:"default"`
+	Allow   []Rule `json:"allow"`
+	Deny    []Rule `json:"deny"`
+}
+
+type Rule struct {
+	IP   string `json:"ip"`
+	Port uint16 `json:"port"`
+}
+
+func matchRule(r Rule, ip string, port uint16) bool {
+	if r.IP != "*" {
+		target := net.ParseIP(ip)
+		if target == nil {
+			return false
+		}
+
+		if _, network, err := net.ParseCIDR(r.IP); err == nil {
+			if !network.Contains(target) {
+				return false
+			}
+		} else {
+			if r.IP != ip {
+				return false
+			}
+		}
+	}
+
+	if r.Port != 0 && r.Port != port {
+		return false
+	}
+
+	return true
+}
+
+func (f *FirewallConfig) match(ip string, port uint16) bool {
+	// 黑名单优先
+	for _, r := range f.Deny {
+		if matchRule(r, ip, port) {
+			return false
+		}
+	}
+	// 白名单
+	for _, r := range f.Allow {
+		if matchRule(r, ip, port) {
+			return true
+		}
+	}
+	// 默认
+	return f.Default
 }
 
 func run(wsConn *websocket.Conn, localIp string) {
@@ -188,12 +248,22 @@ func run(wsConn *websocket.Conn, localIp string) {
 
 	c = NewConvertor(WriteBytesToTun)
 
+	//这个conn是虚拟远方的conn,LocalAddress实际上是DstIP
 	c.StartTCPForwarder(func(tunConn net.Conn, id *stack.TransportEndpointID) {
 		if debug {
 			log.Println("拿到连接了！！！")
 			log.Println(id.LocalAddress)
 			log.Println("cmServer count: ", len(cmServer.Keys()))
 		}
+		dialReq := make([]byte, 17)
+		dialReq[0] = 6
+		copy(dialReq[1:5], id.LocalAddress.AsSlice())
+		copy(dialReq[5:9], id.LocalAddress.AsSlice())
+		copy(dialReq[9:13], id.RemoteAddress.AsSlice())
+		binary.BigEndian.PutUint16(dialReq[13:15], id.LocalPort)
+		binary.BigEndian.PutUint16(dialReq[15:17], id.RemotePort)
+		writeMessageAsync(wsConn, websocket.BinaryMessage, dialReq)
+
 		tunConnHandler := NewConnHandler(tunConn, 1<<14, 0, 0, func(cw *ConnHandler, n int, err error) {
 			if err != nil {
 				wg.Add(1)
@@ -269,7 +339,7 @@ func run(wsConn *websocket.Conn, localIp string) {
 		}()
 	})
 
-	// 上行 goroutine
+	// 上行 goroutine tun网卡接收本地要访问远端的包，tcp通过convertor转为net.conn（防止大量ack和拆包之类的），其余直接发送
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -476,6 +546,13 @@ func run(wsConn *websocket.Conn, localIp string) {
 					if ip != status.IP {
 						log.Println("[WARN] IP地址已变更:", status.IP)
 					}
+					break
+				case "firewall":
+					if err := json.Unmarshal(msg.Data, &firewall); err != nil {
+						log.Println("[ERROR] 解析 firewall 失败:", err)
+						continue
+					}
+					break
 				}
 			} else if msgType == 1 {
 				if len(data) < 4 {
@@ -517,7 +594,17 @@ func run(wsConn *websocket.Conn, localIp string) {
 					if debug {
 						log.Println("dial: " + ip + ":" + fmt.Sprintf("%d", id.LocalPort))
 					}
-					localConn, err := net.Dial("tcp", ip+":"+fmt.Sprintf("%d", id.LocalPort))
+					if !firewall.match(id.RemoteAddress.String(), id.LocalPort) {
+						log.Println("dial failed:", " Firewall denied")
+						continue
+					}
+					var dialIp string
+					if firewall.Local {
+						dialIp = "127.0.0.1"
+					} else {
+						dialIp = ip
+					}
+					localConn, err := net.Dial("tcp", dialIp+":"+fmt.Sprintf("%d", id.LocalPort))
 					if err != nil {
 						log.Println("dial err:", err)
 						continue
@@ -528,78 +615,7 @@ func run(wsConn *websocket.Conn, localIp string) {
 						_ = localConn.Close()
 						continue
 					}
-					localConnHandler = NewConnHandler(localConn, 1024, 0, maxLimit, func(cw *ConnHandler, n int, err error) {
-						if err != nil {
-							wg.Add(1)
-							go func() {
-								defer wg.Done()
-								cmClient.Delete(*id)
-								_ = cw.Close()
-								serverData := make([]byte, 17)
-								serverData[0] = 4
-								copy(serverData[1:5], id.RemoteAddress.AsSlice())
-								copy(serverData[5:9], id.LocalAddress.AsSlice())
-								copy(serverData[9:13], id.RemoteAddress.AsSlice())
-								binary.BigEndian.PutUint16(serverData[13:15], id.LocalPort)
-								binary.BigEndian.PutUint16(serverData[15:17], id.RemotePort)
-								writeMessageAsync(wsConn, websocket.BinaryMessage, serverData)
-							}()
-						}
-					})
-					cmClient.Set(*id, localConnHandler)
-					wg.Add(1)
-					go func() {
-						defer wg.Done()
-						buf := make([]byte, 1<<14)
-						errStop := false
-						for {
-							select {
-							case <-stop:
-								cmClient.Delete(*id)
-								_ = localConnHandler.Close()
-								log.Println("[INFO] Local TCP Forwarder goroutine 退出")
-								closeAll(wsConn)
-								return
-							default:
-							}
-							if errStop {
-								serverData := make([]byte, 17)
-								serverData[0] = 4
-								copy(serverData[1:5], id.RemoteAddress.AsSlice())
-								copy(serverData[5:9], id.LocalAddress.AsSlice())
-								copy(serverData[9:13], id.RemoteAddress.AsSlice())
-								binary.BigEndian.PutUint16(serverData[13:15], id.LocalPort)
-								binary.BigEndian.PutUint16(serverData[15:17], id.RemotePort)
-								writeMessageAsync(wsConn, websocket.BinaryMessage, serverData)
-								return
-							}
-							n, err := localConnHandler.Read(buf)
-							if err != nil {
-								if debug {
-									log.Println("Dial Read error:", err)
-								}
-								cmClient.Delete(*id)
-								_ = localConnHandler.Close()
-								errStop = true
-							}
-
-							data := buf[:n]
-							if debug {
-								//log.Println("dial read:", len(data))
-							}
-
-							serverData := make([]byte, 17+len(data))
-
-							serverData[0] = 3
-							copy(serverData[1:5], id.RemoteAddress.AsSlice())
-							copy(serverData[5:9], id.LocalAddress.AsSlice())
-							copy(serverData[9:13], id.RemoteAddress.AsSlice())
-							binary.BigEndian.PutUint16(serverData[13:15], id.LocalPort)
-							binary.BigEndian.PutUint16(serverData[15:17], id.RemotePort)
-							copy(serverData[17:], data)
-							writeMessageAsync(wsConn, websocket.BinaryMessage, serverData)
-						}
-					}()
+					registerLocalConnHandler(wsConn, localConn, id)
 				}
 			} else if msgType == 3 {
 				if debug {
@@ -693,6 +709,39 @@ func run(wsConn *websocket.Conn, localIp string) {
 						}
 					}
 				}
+			} else if msgType == 6 {
+				if debug {
+					log.Println("6, 收到请求dial")
+				}
+				data = data[4:]
+				id := decodeEndpointID(data)
+				_, ok := cmClient.Get(*id)
+				if ok {
+					if debug {
+						log.Println("6, 存在conn")
+					}
+					continue
+				} else {
+					if debug {
+						log.Println("dial: " + ip + ":" + fmt.Sprintf("%d", id.LocalPort))
+					}
+					if !firewall.match(id.RemoteAddress.String(), id.LocalPort) {
+						log.Println("dial failed:", " Firewall denied")
+						continue
+					}
+					var dialIp string
+					if firewall.Local {
+						dialIp = "127.0.0.1"
+					} else {
+						dialIp = ip
+					}
+					localConn, err := net.Dial("tcp", dialIp+":"+fmt.Sprintf("%d", id.LocalPort))
+					if err != nil {
+						log.Println("dial err:", err)
+						continue
+					}
+					registerLocalConnHandler(wsConn, localConn, id)
+				}
 			}
 		}
 	}()
@@ -700,10 +749,85 @@ func run(wsConn *websocket.Conn, localIp string) {
 	// 等待 goroutine 退出
 	wg.Wait()
 	ip = ""
-
+	tunStarted = false
 	closeAll(wsConn)
 	close(sendQueue)
 	log.Println("[INFO] run() 已退出")
+}
+
+func registerLocalConnHandler(wsConn *websocket.Conn, localConn net.Conn, id *stack.TransportEndpointID) {
+	localConnHandler := NewConnHandler(localConn, 1024, 0, maxLimit, func(cw *ConnHandler, n int, err error) {
+		if err != nil {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				cmClient.Delete(*id)
+				_ = cw.Close()
+				serverData := make([]byte, 17)
+				serverData[0] = 4
+				copy(serverData[1:5], id.RemoteAddress.AsSlice())
+				copy(serverData[5:9], id.LocalAddress.AsSlice())
+				copy(serverData[9:13], id.RemoteAddress.AsSlice())
+				binary.BigEndian.PutUint16(serverData[13:15], id.LocalPort)
+				binary.BigEndian.PutUint16(serverData[15:17], id.RemotePort)
+				writeMessageAsync(wsConn, websocket.BinaryMessage, serverData)
+			}()
+		}
+	})
+	cmClient.Set(*id, localConnHandler)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 1<<14)
+		errStop := false
+		for {
+			select {
+			case <-stop:
+				cmClient.Delete(*id)
+				_ = localConnHandler.Close()
+				log.Println("[INFO] Local TCP Forwarder goroutine 退出")
+				closeAll(wsConn)
+				return
+			default:
+			}
+			if errStop {
+				serverData := make([]byte, 17)
+				serverData[0] = 4
+				copy(serverData[1:5], id.RemoteAddress.AsSlice())
+				copy(serverData[5:9], id.LocalAddress.AsSlice())
+				copy(serverData[9:13], id.RemoteAddress.AsSlice())
+				binary.BigEndian.PutUint16(serverData[13:15], id.LocalPort)
+				binary.BigEndian.PutUint16(serverData[15:17], id.RemotePort)
+				writeMessageAsync(wsConn, websocket.BinaryMessage, serverData)
+				return
+			}
+			n, err := localConnHandler.Read(buf)
+			if err != nil {
+				if debug {
+					log.Println("Dial Read error:", err)
+				}
+				cmClient.Delete(*id)
+				_ = localConnHandler.Close()
+				errStop = true
+			}
+
+			data := buf[:n]
+			if debug {
+				//log.Println("dial read:", len(data))
+			}
+
+			serverData := make([]byte, 17+len(data))
+
+			serverData[0] = 3
+			copy(serverData[1:5], id.RemoteAddress.AsSlice())
+			copy(serverData[5:9], id.LocalAddress.AsSlice())
+			copy(serverData[9:13], id.RemoteAddress.AsSlice())
+			binary.BigEndian.PutUint16(serverData[13:15], id.LocalPort)
+			binary.BigEndian.PutUint16(serverData[15:17], id.RemotePort)
+			copy(serverData[17:], data)
+			writeMessageAsync(wsConn, websocket.BinaryMessage, serverData)
+		}
+	}()
 }
 
 type msg struct {

@@ -2,6 +2,10 @@ package LeapTun_lib
 
 import (
 	"fmt"
+	"log"
+	"net"
+	"time"
+
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -11,22 +15,16 @@ import (
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
 	"gvisor.dev/gvisor/pkg/waiter"
-	"log"
-	"net"
-	"time"
 )
 
 type Convertor struct {
-	stack        *stack.Stack
-	linkEP       *tunLinkEndpoint
-	tunWriteFunc func([]byte) (int, error)
-	closed       bool
+	stack  *stack.Stack
+	linkEP *tunLinkEndpoint
+	closed bool
 }
 
 func NewConvertor(tunWriteFunc func([]byte) (int, error)) *Convertor {
-	c := &Convertor{
-		tunWriteFunc: tunWriteFunc,
-	}
+	c := &Convertor{}
 
 	// 初始化 stack
 	c.stack = stack.New(stack.Options{
