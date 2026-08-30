@@ -23,7 +23,7 @@ type Convertor struct {
 	closed bool
 }
 
-func NewConvertor(tunWriteFunc func([]byte) (int, error)) *Convertor {
+func NewConvertor(tunWriteFunc func([]byte) (int, error), mtu uint32) *Convertor {
 	c := &Convertor{}
 
 	// 初始化 stack
@@ -35,7 +35,7 @@ func NewConvertor(tunWriteFunc func([]byte) (int, error)) *Convertor {
 	// 创建虚拟网卡
 	c.linkEP = &tunLinkEndpoint{
 		tunWrite: tunWriteFunc,
-		Endpoint: channel.New(65536, 1500, ""),
+		Endpoint: channel.New(65536, mtu, ""),
 	}
 
 	c.stack.CreateNICWithOptions(1, c.linkEP, stack.NICOptions{

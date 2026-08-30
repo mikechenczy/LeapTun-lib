@@ -230,7 +230,7 @@ func run(wsConn *websocket.Conn, localIp string) {
 	bufs := make([][]byte, batch)
 	sizes := make([]int, batch)
 	for i := range bufs {
-		bufs[i] = make([]byte, 1500)
+		bufs[i] = make([]byte, mtu+tunPacketOffset)
 	}
 
 	wg = sync.WaitGroup{}
@@ -246,7 +246,7 @@ func run(wsConn *websocket.Conn, localIp string) {
 
 	sendQueue := make(chan packet, 1<<14)
 
-	c = NewConvertor(WriteBytesToTun)
+	c = NewConvertor(WriteBytesToTun, uint32(mtu))
 
 	//这个conn是虚拟远方的conn,LocalAddress实际上是DstIP
 	c.StartTCPForwarder(func(tunConn net.Conn, id *stack.TransportEndpointID) {
