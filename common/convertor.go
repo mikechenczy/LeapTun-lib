@@ -1,6 +1,7 @@
-package LeapTun_lib
+package common
 
 import (
+	"LeapTun_lib/common/version"
 	"fmt"
 	"log"
 	"net"
@@ -78,7 +79,7 @@ func (c *Convertor) Close() {
 	if c.closed {
 		return
 	}
-	if debug {
+	if version.Debug {
 		log.Println("[Convertor] closing...")
 	}
 	c.closed = true
@@ -166,9 +167,9 @@ type tunLinkEndpoint struct {
 	*channel.Endpoint
 }
 
-func (e *tunLinkEndpoint) WritePackets(pkts stack.PacketBufferList) (int, tcpip.Error) {
+func (e *tunLinkEndpoint) WritePackets(packets stack.PacketBufferList) (int, tcpip.Error) {
 	n := 0
-	for _, pkt := range pkts.AsSlice() {
+	for _, pkt := range packets.AsSlice() {
 		buf := pkt.ToBuffer()
 		data := buf.Flatten()
 		if len(data) == 0 {

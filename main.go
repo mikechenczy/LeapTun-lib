@@ -1,6 +1,7 @@
 package LeapTun_lib
 
 import (
+	"LeapTun_lib/common"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -16,49 +17,34 @@ import (
 	"syscall"
 	"time"
 
-	"golang.zx2c4.com/wireguard/tun"
-
 	"github.com/gorilla/websocket"
-)
-
-const (
-	server  = ""
-	version = "v1.4"
-	website = "https://tun.mjczy.top/"
-	source  = "https://github.com/mikechenczy/LeapTun-lib"
-	debug   = false
 )
 
 var token string
 
-type Message struct {
-	Type string          `json:"type"`
-	Data json.RawMessage `json:"data"`
-}
-
 func start(args []string) {
 	log.Println("欢迎使用LeapTun")
-	log.Println("本程序开源无毒，请放心使用，开源地址：", source)
-	log.Println("客户端版本：", version)
-	log.Println("管理用户、房间、token，请前往：", website)
+	log.Println("本程序开源无毒，请放心使用，开源地址：", common.Source)
+	log.Println("客户端版本：", common.Version)
+	log.Println("管理用户、房间、token，请前往：", common.Website)
 	if len(args) < 4 {
 		return
 	}
-	log.Print("读取到 token: ")
 	token = args[1]
-	log.Println(token)
 	fd, err := strconv.Atoi(args[2])
 	if err != nil {
 		log.Println("fd错误:", err)
 		return
 	}
-	dev, _, err = tun.CreateUnmonitoredTUNFromFD(fd)
-	localIp := args[3]
-
+	device, err := createDevice(fd)
+	if err != nil {
+		log.Println("创建 TUN 失败:", err)
+		return
+	}
+	localIP := args[3]
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
 	stopConn := make(chan struct{})
-
 	go func() {
 		for {
 			select {
@@ -67,98 +53,51 @@ func start(args []string) {
 				return
 			default:
 			}
-			// 构造 JSON 并 Base64 编码
-			data := map[string]string{
-				"token":   token,
-				"version": version,
-			}
+			data := map[string]string{"token": token, "version": common.Version}
 			jsonBytes, err := json.Marshal(data)
 			if err != nil {
 				return
 			}
-			wsURL := fmt.Sprintf(server+"%s", base64.StdEncoding.EncodeToString(jsonBytes))
-
+			wsURL := fmt.Sprintf(common.Server+"%s", base64.StdEncoding.EncodeToString(jsonBytes))
 			parsedURL, err := url.Parse(wsURL)
 			if err != nil {
 				log.Println("URL Parse err: ", err)
 				time.Sleep(5 * time.Second)
 				continue
 			}
-
-			// 自定义 DNS 服务器，比如 1.1.1.1
-			customResolver := &net.Resolver{
+			resolver := &net.Resolver{
 				PreferGo: true,
 				Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
-					d := net.Dialer{
-						Timeout: time.Second * 3,
-					}
-					return d.DialContext(ctx, "udp", "1.1.1.1:53")
+					return (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "udp", "1.1.1.1:53")
 				},
 			}
-
-			// 自定义 Transport
-			dialer := &net.Dialer{
-				Timeout:   10 * time.Second,
-				Resolver:  customResolver, // 用上面的自定义解析器
-				KeepAlive: 10 * time.Second,
-			}
-
-			transport := &http.Transport{
-				DialContext: dialer.DialContext,
-			}
-
+			dialer := &net.Dialer{Timeout: 10 * time.Second, Resolver: resolver, KeepAlive: 10 * time.Second}
 			client := &http.Client{
-				Transport: transport,
+				Transport: &http.Transport{DialContext: dialer.DialContext},
 				Timeout:   15 * time.Second,
 				CheckRedirect: func(req *http.Request, via []*http.Request) error {
 					return http.ErrUseLastResponse
 				},
 			}
-
-			// 先发送 HTTP 请求，检查是否重定向
-			response, err := client.Head("http://" + parsedURL.Host + parsedURL.Path)
-			if err == nil {
-				// 如果返回 301/302，获取新的 Location
+			if response, err := client.Head("http://" + parsedURL.Host + parsedURL.Path); err == nil {
 				if response.StatusCode == http.StatusMovedPermanently || response.StatusCode == http.StatusFound {
-					newLocation := response.Header.Get("Location")
-
-					// 解析新地址
-					newURL, err := url.Parse(newLocation)
-					if err != nil {
-						log.Println("Parse URL failed: ", err)
-						time.Sleep(5 * time.Second)
-						continue
+					if newURL, err := url.Parse(response.Header.Get("Location")); err == nil {
+						if newURL.Scheme == "http" {
+							newURL.Scheme = "ws"
+						} else if newURL.Scheme == "https" {
+							newURL.Scheme = "wss"
+						}
+						wsURL = newURL.String()
 					}
-
-					// 修改 ws/wss 前缀
-					if newURL.Scheme == "http" {
-						newURL.Scheme = "ws"
-					} else if newURL.Scheme == "https" {
-						newURL.Scheme = "wss"
-					}
-
-					// 更新连接地址
-					wsURL = newURL.String()
 				}
-				err = response.Body.Close()
-				if err != nil {
-					log.Println("[WARN] 连接失败，5秒后重试:", err)
-					time.Sleep(5 * time.Second)
-					continue
-				}
+				_ = response.Body.Close()
 			}
-
-			// 尝试连接
 			conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 			if err != nil {
 				log.Println("[WARN] 连接失败，5秒后重试:", err)
 				time.Sleep(5 * time.Second)
 				continue
 			}
-
-			log.Println("[INFO] 已连接")
-
-			// 读取一次服务器返回的认证消息
 			_, message, err := conn.ReadMessage()
 			if err != nil {
 				log.Println("[WARN] 读取认证消息失败:", err)
@@ -166,7 +105,6 @@ func start(args []string) {
 				time.Sleep(5 * time.Second)
 				continue
 			}
-
 			var resp map[string]interface{}
 			if err := json.Unmarshal(message, &resp); err != nil {
 				log.Println("[WARN] 解析认证消息失败:", err)
@@ -174,41 +112,30 @@ func start(args []string) {
 				time.Sleep(5 * time.Second)
 				continue
 			}
-
 			log.Println(resp["message"])
 			if code, ok := resp["code"].(float64); ok && code != 0 {
-				log.Println("[WARN] 认证失败，5s后重连:", err)
 				_ = conn.Close()
 				time.Sleep(5 * time.Second)
 				continue
 			}
-
-			// 调用核心逻辑 run(conn)，断开后自动重连
-			run(conn, localIp)
-
-			// run 返回说明 WebSocket 已断开
-			log.Println("[WARN] WebSocket 断开，5秒后重连...")
+			common.ConfigureDevice(device, localIP, nil)
+			if err := common.Run(conn); err != nil {
+				log.Println("[ERROR] 启动 TUN 会话失败:", err)
+			}
 			time.Sleep(5 * time.Second)
 		}
 	}()
-
 	<-sig
-	stopOnce.Do(func() { close(stop) })
+	common.StopOnce.Do(func() { close(common.Stop) })
 	close(stopConn)
-	time.Sleep(200 * time.Millisecond) // 等 goroutine 优雅退出
-	log.Println("[INFO] 客户端退出")
+	time.Sleep(200 * time.Millisecond)
 }
 
-type LogInterface interface {
-	LogCallback(msg string)
-}
+type LogInterface interface{ LogCallback(msg string) }
 
 var logger LogInterface
 
-func SetLogger(log LogInterface) {
-	logger = log
-}
-
+func SetLogger(l LogInterface) { logger = l }
 func androidLog(msg string) {
 	if logger != nil {
 		logger.LogCallback(msg)
@@ -218,7 +145,6 @@ func androidLog(msg string) {
 func Run(arg string) {
 	log.SetFlags(0)
 	log.SetOutput(logWriter{})
-
 	log.Println("Go started with arg:", arg)
 	start(strings.Fields("tcp_over_ws " + arg))
 }

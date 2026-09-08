@@ -1,4 +1,4 @@
-package LeapTun_lib
+package common
 
 import (
 	"context"
@@ -24,7 +24,6 @@ type ConnHandler struct {
 	readLimiter  *rate.Limiter
 }
 
-// 新建 ConnHandler，可指定读写限速（bytes/s），0 或负数表示不限速
 func NewConnHandler(conn net.Conn, queueSize int, writeBps, readBps int, onWrite func(cw *ConnHandler, n int, err error)) *ConnHandler {
 	cw := &ConnHandler{
 		conn:    conn,
@@ -81,6 +80,7 @@ func (cw *ConnHandler) Write(data []byte) {
 	cw.queue <- data
 }
 
+// Read 限速
 func (cw *ConnHandler) Read(p []byte) (int, error) {
 	if cw.getReadLimiter() != nil {
 		err := cw.getReadLimiter().WaitN(context.Background(), cap(p))
