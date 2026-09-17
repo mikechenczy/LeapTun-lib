@@ -79,7 +79,7 @@ func start(args []string) {
 					return http.ErrUseLastResponse
 				},
 			}
-			if response, err := client.Head("http://" + parsedURL.Host + parsedURL.Path); err == nil {
+			if response, err := client.Head(common.GetHTTPScheme(parsedURL) + parsedURL.Host + parsedURL.Path); err == nil {
 				if response.StatusCode == http.StatusMovedPermanently || response.StatusCode == http.StatusFound {
 					if newURL, err := url.Parse(response.Header.Get("Location")); err == nil {
 						if newURL.Scheme == "http" {

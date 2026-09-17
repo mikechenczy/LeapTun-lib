@@ -1,7 +1,8 @@
 package common
 
 import (
-	"LeapTun_lib/common/version"
+	"LeapTun/common/version"
+	"LeapTun/specified"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -28,9 +29,7 @@ type packet struct {
 
 var (
 	tunStarted  = false
-	ip          = "10.0.0.0"
-	initialIP   = "10.0.0.0"
-	configureIP func(string) error
+	IP          = "10.0.0.0"
 	Stop        = make(chan struct{})
 	wg          sync.WaitGroup
 	StopOnce    sync.Once
@@ -62,11 +61,9 @@ func closeAll(conn *websocket.Conn) {
 			continue
 		}
 		cmClient.Delete(id)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_ = conn.Close()
-		}()
+		})
 	}
 	for _, id := range cmServer.Keys() {
 		conn, ok := cmServer.Get(id)
@@ -74,21 +71,18 @@ func closeAll(conn *websocket.Conn) {
 			continue
 		}
 		cmServer.Delete(id)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_ = conn.Close()
-		}()
+		})
 	}
 }
 
 // ConfigureDevice supplies the TUN device owned by the platform entry point.
 // The common package closes the device when the session ends. setIP is optional;
 // mobile callers normally configure the address outside Go and can leave it nil.
-func ConfigureDevice(device tun.Device, localIP string, setIP func(string) error) {
+func ConfigureDevice(device tun.Device, initialIP string) {
 	dev = device
-	initialIP = localIP
-	configureIP = setIP
+	IP = initialIP
 }
 
 func Run(wsConn *websocket.Conn) error {
@@ -97,7 +91,6 @@ func Run(wsConn *websocket.Conn) error {
 		return fmt.Errorf("TUN device has not been configured")
 	}
 	tunStarted = true
-	ip = initialIP
 
 	devName, _ = dev.Name()
 	mtu, _ = dev.MTU()
@@ -120,7 +113,7 @@ func Run(wsConn *websocket.Conn) error {
 
 	// 等待 goroutine 退出
 	wg.Wait()
-	ip = ""
+	IP = ""
 	tunStarted = false
 	closeAll(wsConn)
 	close(sendQueue)
@@ -130,9 +123,7 @@ func Run(wsConn *websocket.Conn) error {
 
 func startDownloadThread(wsConn *websocket.Conn) {
 	// 下行循环（改为二进制格式）
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-Stop:
@@ -206,8 +197,13 @@ func startDownloadThread(wsConn *websocket.Conn) {
 						}
 					}
 
-					if ip != status.IP {
-						if err := setIPv4Addr(status.IP); err != nil {
+					if IP != status.IP {
+						if !tunStarted {
+							log.Println("[ERROR] 设置IP失败:", "Tun未启动")
+							continue
+						}
+						IP = status.IP
+						if err := specified.SetIPv4Addr(IP, devName); err != nil {
 							log.Println("[ERROR] 设置IP失败:", err)
 						}
 					}
@@ -304,14 +300,12 @@ func startDownloadThread(wsConn *websocket.Conn) {
 			}
 			//If codes are added here, remember to check whether upper codes should call `continue`.
 		}
-	}()
+	})
 
 }
 
 func startTUNUploadThread(wsConn *websocket.Conn, sendQueue chan packet) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		batchSizeBytes := 64 * 1024
 		flushInterval := 5 * time.Millisecond
 
@@ -383,7 +377,7 @@ func startTUNUploadThread(wsConn *websocket.Conn, sendQueue chan packet) {
 				flush()
 			}
 		}
-	}()
+	})
 }
 
 func startUploadThread(wsConn *websocket.Conn, sendQueue chan packet) {
@@ -399,9 +393,7 @@ func startUploadThread(wsConn *websocket.Conn, sendQueue chan packet) {
 	}
 
 	// 上行 goroutine tun网卡接收本地要访问远端的包，tcp通过convertor转为net.conn（防止大量ack和拆包之类的），其余直接发送
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-Stop:
@@ -422,10 +414,10 @@ func startUploadThread(wsConn *websocket.Conn, sendQueue chan packet) {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-			for i := 0; i < n; i++ {
+			for i := range n {
 				data := buffs[i][tunPacketOffset : tunPacketOffset+sizes[i]]
 				dstIP := getDstIP(data)
-				if dstIP == "" || ip == "" || !isSameSubnet(dstIP, ip) || ip == dstIP {
+				if dstIP == "" || IP == "" || !isSameSubnet(dstIP, IP) || IP == dstIP {
 					continue
 				}
 				if len(data) <= 9 {
@@ -447,7 +439,7 @@ func startUploadThread(wsConn *websocket.Conn, sendQueue chan packet) {
 				}
 			}
 		}
-	}()
+	})
 }
 
 func startConvertor(wsConn *websocket.Conn) {
@@ -468,9 +460,7 @@ func startConvertor(wsConn *websocket.Conn) {
 
 		tunConnHandler := NewConnHandler(tunConn, 1<<14, 0, 0, func(cw *ConnHandler, n int, err error) {
 			if err != nil {
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					if version.Debug {
 						log.Println("数据写入失败")
 					}
@@ -481,13 +471,11 @@ func startConvertor(wsConn *websocket.Conn) {
 					copy(serverData[1:5], id.LocalAddress.AsSlice())
 					copyIdToData(serverData, id)
 					writeMessageAsync(wsConn, websocket.BinaryMessage, serverData)
-				}()
+				})
 			}
 		})
 		cmServer.Set(*id, tunConnHandler)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			buf := make([]byte, 1<<14)
 			errStop := false
 			for {
@@ -529,13 +517,13 @@ func startConvertor(wsConn *websocket.Conn) {
 
 				writeMessageAsync(wsConn, websocket.BinaryMessage, serverData)
 			}
-		}()
+		})
 	})
 }
 
 func dialAndRegister(wsConn *websocket.Conn, id *stack.TransportEndpointID, data []byte) bool {
 	if version.Debug {
-		log.Println("dial: " + ip + ":" + fmt.Sprintf("%d", id.LocalPort))
+		log.Println("dial: " + IP + ":" + fmt.Sprintf("%d", id.LocalPort))
 	}
 	if !firewall.match(id.RemoteAddress.String(), id.LocalPort) {
 		log.Println("dial failed:", " Firewall denied")
@@ -545,7 +533,7 @@ func dialAndRegister(wsConn *websocket.Conn, id *stack.TransportEndpointID, data
 	if firewall.Local {
 		dialIp = "127.0.0.1"
 	} else {
-		dialIp = ip
+		dialIp = IP
 	}
 	localConn, err := net.Dial("tcp", dialIp+":"+fmt.Sprintf("%d", id.LocalPort))
 	if err != nil {
@@ -574,9 +562,7 @@ func copyIdToData(data []byte, id *stack.TransportEndpointID) {
 func registerLocalConnHandler(wsConn *websocket.Conn, localConn net.Conn, id *stack.TransportEndpointID) {
 	localConnHandler := NewConnHandler(localConn, 1024, 0, maxLimit, func(cw *ConnHandler, n int, err error) {
 		if err != nil {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				cmClient.Delete(*id)
 				_ = cw.Close()
 				serverData := make([]byte, 17)
@@ -584,13 +570,11 @@ func registerLocalConnHandler(wsConn *websocket.Conn, localConn net.Conn, id *st
 				copy(serverData[1:5], id.RemoteAddress.AsSlice())
 				copyIdToData(serverData, id)
 				writeMessageAsync(wsConn, websocket.BinaryMessage, serverData)
-			}()
+			})
 		}
 	})
 	cmClient.Set(*id, localConnHandler)
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		buf := make([]byte, 1<<14)
 		errStop := false
 		for {
@@ -627,7 +611,7 @@ func registerLocalConnHandler(wsConn *websocket.Conn, localConn net.Conn, id *st
 			copy(serverData[17:], buf[:n])
 			writeMessageAsync(wsConn, websocket.BinaryMessage, serverData)
 		}
-	}()
+	})
 }
 
 type msg struct {
@@ -641,9 +625,7 @@ var (
 )
 
 func initWsWriter(wsConn *websocket.Conn) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for {
 			select {
 			case <-Stop:
@@ -665,11 +647,9 @@ func initWsWriter(wsConn *websocket.Conn) {
 				}
 			}
 		}
-	}()
+	})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		currentLimit := maxLimit
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
@@ -721,7 +701,7 @@ func initWsWriter(wsConn *websocket.Conn) {
 				}
 			}
 		}
-	}()
+	})
 }
 
 func writeMessageAsync(wsConn *websocket.Conn, messageType int, data []byte) {

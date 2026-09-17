@@ -4,6 +4,8 @@ import (
 	"encoding/binary"
 	"log"
 	"net"
+	"net/url"
+	"strings"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/stack"
@@ -50,4 +52,13 @@ func decodeEndpointID(b []byte) *stack.TransportEndpointID {
 		RemotePort:    binary.BigEndian.Uint16(b[10:12]),
 	}
 	return id
+}
+
+func GetHTTPScheme(url *url.URL) string {
+	switch strings.ToLower(url.Scheme) {
+	case "https", "wss":
+		return "https://"
+	default:
+		return "http://"
+	}
 }
