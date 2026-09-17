@@ -1,6 +1,6 @@
 //go:build !android && !darwin
 
-package LeapTun_lib
+package LeapTun
 
 import (
 	"fmt"

@@ -1,7 +1,7 @@
 package common
 
 import (
-	"LeapTun_lib/common/version"
+	"LeapTun/common/version"
 	"fmt"
 	"log"
 	"net"

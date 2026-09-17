@@ -1,7 +1,7 @@
 package common
 
 import (
-	"LeapTun_lib/common/version"
+	"LeapTun/common/version"
 	"sync"
 
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -55,14 +55,12 @@ func closeConn(connMap *ConnMap, id *stack.TransportEndpointID) {
 	if ok {
 		version.DebugLog("收到关闭连接，开始关闭")
 		cmClient.Delete(*id)
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			err := connClient.Close()
 			if err != nil {
 				version.DebugLog("关闭连接失败：", err)
 			}
-		}()
+		})
 	}
 }
 
@@ -81,14 +79,12 @@ func closeByIP(connMap *ConnMap, ip tcpip.Address) {
 			if ok {
 				version.DebugLog("收到关闭连接，开始关闭")
 				connMap.Delete(id)
-				wg.Add(1)
-				go func() {
-					defer wg.Done()
+				wg.Go(func() {
 					err := conn.Close()
 					if err != nil {
 						version.DebugLog("关闭连接失败：", err)
 					}
-				}()
+				})
 			}
 		}
 	}

@@ -1,6 +1,6 @@
 //go:build android
 
-package LeapTun_lib
+package LeapTun
 
 import "golang.zx2c4.com/wireguard/tun"
 

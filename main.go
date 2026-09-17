@@ -1,7 +1,7 @@
-package LeapTun_lib
+package LeapTun
 
 import (
-	"LeapTun_lib/common"
+	"LeapTun/common"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -105,7 +105,7 @@ func start(args []string) {
 				time.Sleep(5 * time.Second)
 				continue
 			}
-			var resp map[string]interface{}
+			var resp map[string]any
 			if err := json.Unmarshal(message, &resp); err != nil {
 				log.Println("[WARN] 解析认证消息失败:", err)
 				_ = conn.Close()
@@ -118,7 +118,7 @@ func start(args []string) {
 				time.Sleep(5 * time.Second)
 				continue
 			}
-			common.ConfigureDevice(device, localIP, nil)
+			common.ConfigureDevice(device, localIP)
 			if err := common.Run(conn); err != nil {
 				log.Println("[ERROR] 启动 TUN 会话失败:", err)
 			}

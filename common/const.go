@@ -4,7 +4,7 @@ import "encoding/json"
 
 const (
 	Server  = ""
-	Version = "v1.5"
+	Version = "v1.6"
 	Website = "https://tun.mjczy.top/"
 	Source  = "https://github.com/mikechenczy/LeapTun"
 )

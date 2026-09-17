@@ -1,4 +1,4 @@
-module LeapTun_lib
+module LeapTun
 
 go 1.26.0
 

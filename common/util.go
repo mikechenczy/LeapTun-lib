@@ -2,7 +2,6 @@ package common
 
 import (
 	"encoding/binary"
-	"fmt"
 	"log"
 	"net"
 
@@ -51,15 +50,4 @@ func decodeEndpointID(b []byte) *stack.TransportEndpointID {
 		RemotePort:    binary.BigEndian.Uint16(b[10:12]),
 	}
 	return id
-}
-
-func setIPv4Addr(ipAddr string) error {
-	if !tunStarted {
-		return fmt.Errorf("TUN尚未启动")
-	}
-	ip = ipAddr
-	if configureIP == nil {
-		return nil
-	}
-	return configureIP(ipAddr)
 }
